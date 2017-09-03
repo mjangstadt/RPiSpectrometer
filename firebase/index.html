@@ -1,0 +1,112 @@
+<html>
+<head>
+  <script src="https://www.gstatic.com/firebasejs/4.3.0/firebase.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.6.0/Chart.js"></script>
+</head>
+<body>
+  <div id="responsive-container" style="width:100%;height:100%;">
+    <canvas id="myChart" width="400" height="200"></canvas>
+  </div>
+<script>
+// Initialize Firebase
+var config = {
+  apiKey: "AIzaSyB4R7yPuFXQxgp99JPJZ5CgPETYv-cQPo4",
+  authDomain: "spectrometer-bba6d.firebaseapp.com",
+  databaseURL: "https://spectrometer-bba6d.firebaseio.com",
+  projectId: "spectrometer-bba6d",
+  storageBucket: "spectrometer-bba6d.appspot.com",
+  messagingSenderId: "61626135717"
+};
+firebase.initializeApp(config);
+
+var ctx = document.getElementById("myChart").getContext('2d');
+
+var width = document.getElementById('responsive-container').offsetWidth;
+var gradient = ctx.createLinearGradient(20, 0, width, 0);
+gradient.addColorStop(0, 'rgba(64,0,64,1)');
+gradient.addColorStop(0.05, 'rgba(255,0,255,1)');
+gradient.addColorStop(0.175, 'rgba(0,0,255,1)');
+gradient.addColorStop(0.2125, 'rgba(0,255,255,1)');
+gradient.addColorStop(0.35, 'rgba(0,255,0,1)');
+gradient.addColorStop(0.4625, 'rgba(255,255,0,1)');
+gradient.addColorStop(0.675, 'rgba(255,0,0,1)');
+gradient.addColorStop(1, 'rgba(64,0,0,1)');
+
+var myChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      yAxisID: 'amplitude',
+      xAxisID: 'wavelength',
+      datasets: [{
+        backgroundColor: gradient,
+        label: 'spectrum',
+        data: []
+      }]
+    },
+    options: {
+      legend: {
+        display: false
+      },
+      elements: {
+        point: {
+          radius: 0,
+        }
+      },
+      scales: {
+          yAxes: [{
+            id: 'amplitude',
+            type: 'linear',
+            scaleLabel: {
+              display: true,
+              labelString: 'amplitude',
+            },
+            ticks: {
+              display: false,
+              beginAtZero:true
+            }
+          }],
+          xAxes: [{
+            id: 'wavelength',
+            type: 'linear',
+            autoSkip: true,
+            scaleLabel: {
+              display: true,
+              labelString: 'wavelength',
+            },
+            gridLines: {
+              display: true,
+              drawTicks: true,
+              drawOnChartArea: true,
+            },
+            ticks: {
+              display: true,
+              min: 380,
+              max: 780,
+              stepSize: 40
+            }
+          }]
+      }
+    }
+});
+
+var graph = firebase.database().ref('/graph');
+graph.on('value', function(snapshot) {
+  var data = []
+  for (n = 0, len = snapshot.val().length; n < len; n++) {
+    obj = {
+      x: snapshot.val()[n].wavelength,
+      y: snapshot.val()[n].amplitude,
+    }
+    data.push(obj);
+  }
+  modifyData(myChart, data);
+})
+
+function modifyData(chart, data) {
+    chart.data.datasets[0].data = data;
+    chart.update();
+}
+</script>
+  
+</body>
+</html>
