@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install pip modules
 RUN pip install pillow
+RUN pip install firebase-admin
 
 # Install picamera
 RUN pip install picamera

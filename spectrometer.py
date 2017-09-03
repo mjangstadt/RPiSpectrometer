@@ -1,11 +1,21 @@
-import math, sys
+import json
 import picamera
 import threading
+import math, sys
 from io import BytesIO
 from time import sleep
 from fractions import Fraction
 from collections import OrderedDict
 from PIL import Image, ImageDraw, ImageFile, ImageFont
+
+import firebase_admin
+from firebase_admin import credentials, db
+
+cred = credentials.Certificate("spectrometer-bba6d-firebase-adminsdk-7c4pi-1daece715f.json")
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://spectrometer-bba6d.firebaseio.com'
+})
+ref = db.reference('')
 
 #scan a column to determine top and bottom of area of lightness
 def getSpectrumYBound(pix,x,middleY,spectrum_threshold,spectrum_threshold_duration):
@@ -283,30 +293,19 @@ def processImage(self):
     elif (exposure>0.3):
     	print "consider reducing shutter time"
 
-    #save image with markup
-    outputFilename=name+"_out.jpg"
-    ImageFile.MAXBLOCK = 2**20
-    im.save(outputFilename, "JPEG", quality=80, optimize=True, progressive=True)
-    print "Markup image generated"
-
     #normalise results
     for wavelength in results:
     	results[wavelength]=results[wavelength]/maxResult
-
-    #save csv of results
-    csvFilename=name+".csv"
-    csv = open(csvFilename, 'w')
-    csv.write("wavelength,amplitude\n")
+	
+    dataPoints = []
     for wavelength in results:
-    	csv.write(wavelength)
-    	csv.write(",")
-    	csv.write("{:0.3f}".format(results[wavelength]))
-    	csv.write("\n");
-    csv.close()
-    print "CSV Generated"
-    #self.owner.done=True
+	dataPoints.append({
+	    'wavelength': wavelength,
+	    'amplitude': "{:0.3f}".format(results[wavelength])
+	})
+    ref.update({'graph': dataPoints})
+    print "Firebase updated"
     
-
 
 with picamera.PiCamera() as camera:
     camera.vflip = True
