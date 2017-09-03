@@ -1,8 +1,11 @@
-import os,sys, math, time
-from PIL import Image, ImageDraw, ImageFile, ImageFont
+import math, sys
 import picamera
-from collections import OrderedDict
+import threading
+from io import BytesIO
+from time import sleep
 from fractions import Fraction
+from collections import OrderedDict
+from PIL import Image, ImageDraw, ImageFile, ImageFont
 
 #scan a column to determine top and bottom of area of lightness
 def getSpectrumYBound(pix,x,middleY,spectrum_threshold,spectrum_threshold_duration):
@@ -36,10 +39,10 @@ def getSpectrumYBound(pix,x,middleY,spectrum_threshold,spectrum_threshold_durati
 
 
 #find aperture on right hand side of image along middle line
-def findAperture(pix,middleX,middleY):
+def findAperture(pix,width,middleX,middleY):
 	aperture_brightest=0
 	aperture_x=0
-	for x in range(middleX,im.size[0],1):
+	for x in range(middleX,width,1):
 		r, g, b = pix[x,middleY]
 		brightness=r+g+b
 		if brightness>aperture_brightest:
@@ -56,7 +59,7 @@ def findAperture(pix,middleX,middleY):
 			break
 	
 	aperture_x2=aperture_x
-	for x in range(aperture_x,im.size[0],1):
+	for x in range(aperture_x,width,1):
 		r, g, b = pix[x,middleY]
 		brightness=r+g+b
 		if brightness<aperture_threshold:
@@ -118,186 +121,206 @@ def wavelengthToColor(lambda2):
         factor = 0.2 + 0.8*(780 - lambda2) / (780 - 600);
     return ( int(255*color[0]*factor),int(255*color[1]*factor),int(255*color[2]*factor) )
 
+class ImageProcessor(threading.Thread):
+    def __init__(self, owner):
+        super(ImageProcessor, self).__init__()
+        self.stream = BytesIO()
+        self.event = threading.Event()
+        self.terminated = False
+        self.owner = owner
+        self.start()
+
+    def run(self):
+        # This method runs in a separate thread
+        while not self.terminated:
+            # Wait for an image to be written to the stream
+            if self.event.wait(1):
+                try:
+                    self.stream.seek(0)
+                    # Read the image and do some processing on it
+                    print "Processing image"
+                    processImage(self)
+                finally:
+                    # Reset the stream and event
+                    self.stream.seek(0)
+                    self.stream.truncate()
+                    self.event.clear()
+                    # Return ourselves to the available pool
+                    with self.owner.lock:
+                        self.owner.pool.append(self)
+
+class ProcessOutput(object):
+    def __init__(self):
+        self.done = False
+        # Construct a pool of 4 image processors along with a lock
+        # to control access between threads
+        self.lock = threading.Lock()
+        self.pool = [ImageProcessor(self) for i in range(4)]
+        self.processor = None
+
+    def write(self, buf):
+        if buf.startswith(b'\xff\xd8'):
+            # New frame; set the current processor going and grab
+            # a spare one
+            if self.processor:
+                self.processor.event.set()
+            with self.lock:
+                if self.pool:
+                    self.processor = self.pool.pop()
+                else:
+                    # No processor's available, we'll have to skip
+                    print "Skipping frame"
+                    self.processor = None
+        if self.processor:
+            self.processor.stream.write(buf)
+
+    def flush(self):
+        # When told to flush (this indicates end of recording), shut
+        # down in an orderly fashion. First, add the current processor
+        # back to the pool
+        if self.processor:
+            with self.lock:
+                self.pool.append(self.processor)
+                self.processor = None
+        # Now, empty the pool, joining each thread as we go
+        while True:
+            with self.lock:
+                try:
+                    proc = self.pool.pop()
+                except IndexError:
+                    pass # pool is empty
+            proc.terminated = True
+            proc.join()
+
+def processImage(self):
+    name = sys.argv[1]
+    im = Image.open(self.stream)
+    width=im.size[0]
+    height=im.size[1]
+    middleY=height/2
+    middleX=width/2
+    pix = im.load()
+    #print im.bits, im.size, im.format
+
+    draw=ImageDraw.Draw(im)
+    spectrumAngle=0.03
+
+    aperture=findAperture(pix,width,middleX,middleY)
+    #print aperture
+    drawAperture(aperture,draw);
+    drawScanLine(aperture,spectrumAngle,draw)
 
 
+    wavelengthFactor=0.892 # 1000/mm
+    #wavelengthFactor=0.892*2.0*600/650 # 500/mm
+
+    xd=aperture['x']
+    h=aperture['h']/2
+    step=1
+    last_graphY=0
+    maxResult=0
+    results=OrderedDict()
+    for x in range(0,xd*7/8,step):
+        wavelength=(xd-x)*wavelengthFactor
+        if (wavelength<380):
+    		continue
+    	if (wavelength>1000):
+    		continue
+    	
+    	#general efficiency curve of 1000/mm grating
+    	eff=(800-(wavelength-250))/800
+    	if (eff<0.3):
+    		eff=0.3
+    		
+    	
+    	#notch near yellow maybe caused by camera sensitivity
+    	mid=575
+    	width=10
+    	if (wavelength>(mid-width) and wavelength<(mid+width)):
+    		d=(width-abs(wavelength-mid))/width
+    		eff=eff*(1-d*0.1);
+
+    	#up notch near 590
+    	mid=588
+    	width=10
+    	if (wavelength>(mid-width) and wavelength<(mid+width)):
+    		d=(width-abs(wavelength-mid))/width
+    		eff=eff*(1+d*0.1);
 
 
+    	
+    	y0=math.tan(spectrumAngle)*(xd-x)+aperture['y']
+    	amplitude=0
+    	ac=0.0
+    	for y in range(int(y0-h),int(y0+h),1):
+    		r, g, b = pix[x,y]
+    		#q=math.sqrt(r*r+b*b+g*g*1.5);
+    		q=r+b+g*2
+    		if y<(y0-h+2) or y>(y0+h-3):
+    			q=q*0.5
+    		amplitude=amplitude+q
+    		ac=ac+1.0
+    	amplitude=amplitude/(ac)/(eff)
+    	#amplitude=1/eff
+    	results[str(wavelength)]=amplitude
+    	if amplitude>maxResult:
+    		maxResult=amplitude
+    	graphY=amplitude/50*h
+    	draw.line((x-step,y0+h-last_graphY, x,y0+h-graphY),fill="#fff")
+    	last_graphY=graphY
 
-name=sys.argv[1]
-shutter=long(sys.argv[2])
+    for wl in range(400,1001,50):
+    	x=xd-(wl/wavelengthFactor)
+    	y0=math.tan(spectrumAngle)*(xd-x)+aperture['y']
+    	draw.line((x,y0+h+5, x,y0+h-5))
+    	draw.text((x,y0+h+15),str(wl))
+    	
+    exposure=maxResult/(255+255+255)
+    print "ideal exposure between 0.15 and 0.30"
+    print "exposure=",exposure
+    if (exposure<0.15):
+    	print "consider increasing shutter time"
+    elif (exposure>0.3):
+    	print "consider reducing shutter time"
 
+    #save image with markup
+    outputFilename=name+"_out.jpg"
+    ImageFile.MAXBLOCK = 2**20
+    im.save(outputFilename, "JPEG", quality=80, optimize=True, progressive=True)
+    print "Markup image generated"
 
-camera = picamera.PiCamera()
+    #normalise results
+    for wavelength in results:
+    	results[wavelength]=results[wavelength]/maxResult
+
+    #save csv of results
+    csvFilename=name+".csv"
+    csv = open(csvFilename, 'w')
+    csv.write("wavelength,amplitude\n")
+    for wavelength in results:
+    	csv.write(wavelength)
+    	csv.write(",")
+    	csv.write("{:0.3f}".format(results[wavelength]))
+    	csv.write("\n");
+    csv.close()
+    print "CSV Generated"
+    #self.owner.done=True
     
-camera.vflip = True
-camera.framerate = Fraction(1, 6)
-camera.shutter_speed = shutter
-camera.iso=100
-camera.exposure_mode = 'off'
-
-camera.awb_mode='off'
-camera.awb_gains=(1,1)
-
-rawFilename=name+"_raw.jpg"
-time.sleep(3)
-camera.capture(rawFilename,resize=(1296,972))
-
-im = Image.open(rawFilename)
-middleY=im.size[1]/2
-middleX=im.size[0]/2
-pix = im.load()
-#print im.bits, im.size, im.format
-
-draw=ImageDraw.Draw(im)
-spectrumAngle=0.03
-
-aperture=findAperture(pix,middleX,middleY)
-#print aperture
-drawAperture(aperture,draw);
-drawScanLine(aperture,spectrumAngle,draw)
 
 
-wavelengthFactor=0.892 # 1000/mm
-#wavelengthFactor=0.892*2.0*600/650 # 500/mm
-
-xd=aperture['x']
-h=aperture['h']/2
-step=1
-last_graphY=0
-maxResult=0
-results=OrderedDict()
-for x in range(0,xd*7/8,step):
-	wavelength=(xd-x)*wavelengthFactor
-	if (wavelength<380):
-		continue
-	if (wavelength>1000):
-		continue
-	
-	#general efficiency curve of 1000/mm grating
-	eff=(800-(wavelength-250))/800
-	if (eff<0.3):
-		eff=0.3
-		
-	
-	#notch near yellow maybe caused by camera sensitivity
-	mid=575
-	width=10
-	if (wavelength>(mid-width) and wavelength<(mid+width)):
-		d=(width-abs(wavelength-mid))/width
-		eff=eff*(1-d*0.1);
-
-	#up notch near 590
-	mid=588
-	width=10
-	if (wavelength>(mid-width) and wavelength<(mid+width)):
-		d=(width-abs(wavelength-mid))/width
-		eff=eff*(1+d*0.1);
-
-
-	
-	y0=math.tan(spectrumAngle)*(xd-x)+aperture['y']
-	amplitude=0
-	ac=0.0
-	for y in range(int(y0-h),int(y0+h),1):
-		r, g, b = pix[x,y]
-		#q=math.sqrt(r*r+b*b+g*g*1.5);
-		q=r+b+g*2
-		if y<(y0-h+2) or y>(y0+h-3):
-			q=q*0.5
-		amplitude=amplitude+q
-		ac=ac+1.0
-	amplitude=amplitude/(ac)/(eff)
-	#amplitude=1/eff
-	results[str(wavelength)]=amplitude
-	if amplitude>maxResult:
-		maxResult=amplitude
-	graphY=amplitude/50*h
-	draw.line((x-step,y0+h-last_graphY, x,y0+h-graphY),fill="#fff")
-	last_graphY=graphY
-
-for wl in range(400,1001,50):
-	x=xd-(wl/wavelengthFactor)
-	y0=math.tan(spectrumAngle)*(xd-x)+aperture['y']
-	draw.line((x,y0+h+5, x,y0+h-5))
-	draw.text((x,y0+h+15),str(wl))
-	
-exposure=maxResult/(255+255+255)
-print "ideal exposure between 0.15 and 0.30"
-print "exposure=",exposure
-if (exposure<0.15):
-	print "consider increasing shutter time"
-elif (exposure>0.3):
-	print "consider reducing shutter time"
-
-#save image with markup
-outputFilename=name+"_out.jpg"
-ImageFile.MAXBLOCK = 2**20
-im.save(outputFilename, "JPEG", quality=80, optimize=True, progressive=True)
-
-#normalise results
-for wavelength in results:
-	results[wavelength]=results[wavelength]/maxResult 
-
-#save csv of results
-csvFilename=name+".csv"
-csv = open(csvFilename, 'w')
-csv.write("wavelength,amplitude\n")
-for wavelength in results:
-	csv.write(wavelength)
-	csv.write(",")
-	csv.write("{:0.3f}".format(results[wavelength]))
-	csv.write("\n");
-csv.close()
-
-#generate spectrum diagram
-antialias=4
-w=600*antialias
-h2=300*antialias
-
-
-h=h2-20*antialias
-sd = Image.new('RGB', (w, h2), (255,255,255))
-draw = ImageDraw.Draw(sd)
-
-w1= 380.0
-w2= 780.0
-f1 = 1.0/w1;
-f2 = 1.0/w2;
-for x in range(0,w,1):
-	# Iterate across frequencies, not wavelengths
-	lambda2 = 1.0/(f1-(float(x)/float(w)*(f1-f2)))
-	c=wavelengthToColor(lambda2)
-	draw.line((x, 0, x, h),fill=c)
-	
-pl=[]
-pl.append( (w,0) )
-pl.append( (w,h) )
-for wavelength in results:
-	wl=float(wavelength)
-	x=int( (wl-w1)/(w2-w1) * w )
-	#print wavelength,x
-	pl.append( ( int(x), int((1-results[wavelength])*h) ) )
-pl.append( (0,h) )
-pl.append( (0,0) )
-draw.polygon(pl,fill="#FFF")
-draw.polygon(pl)
-
-font = ImageFont.truetype("Lato-Regular.ttf", 12*antialias)
-draw.line((0,h,w,h),fill="#000",width=antialias)
-
-for wl in range(400,1001,10):
-	x=int( (float(wl)-w1)/(w2-w1) * w )
-	draw.line((x,h, x,h+3*antialias),fill="#000",width=antialias)
-
-
-for wl in range(400,1001,50):
-	x=int( (float(wl)-w1)/(w2-w1) * w )
-	draw.line((x,h, x,h+5*antialias),fill="#000",width=antialias)
-	wls=str(wl)
-	tx=draw.textsize(wls,font=font)
-	draw.text((x-tx[0]/2,h+5*antialias),wls,font=font)
-
-#save chart
-sd = sd.resize((w/antialias,h/antialias), Image.ANTIALIAS)
-outputFilename=name+"_chart.png"
-sd.save(outputFilename, "PNG", quality=95, optimize=True, progressive=True)
+with picamera.PiCamera() as camera:
+    camera.vflip = True
+    camera.framerate = Fraction(1, 6)
+    camera.sensor_mode = 3
+    camera.shutter_speed = long(sys.argv[2])
+    camera.iso=800
+    camera.exposure_mode = 'off'
+    camera.awb_mode='off'
+    camera.awb_gains=(1,1)
+    camera.start_preview()
+    sleep(2)
+    output = ProcessOutput()
+    camera.start_recording(output, format='mjpeg')
+    while not output.done:
+        camera.wait_recording(1)
+    camera.stop_recording()
